@@ -2,8 +2,7 @@ package agent
 
 import "testing"
 
-// ActivityLabel is shared by the TUI and the Telegram gateway, so both narrate
-// tool activity with the same natural phrases.
+// ActivityLabel is shared by the TUI and the API server, so both narrate
 func TestActivityLabel(t *testing.T) {
 	cases := []struct {
 		name, args, want string

@@ -7,6 +7,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/hirotomasato/hiroto/internal/llm"
+	"github.com/hirotomasato/hiroto/internal/tools"
 )
 
 // CompressNow forces a compression regardless of budget (manual trigger).
@@ -65,7 +66,8 @@ func (a *Agent) compress(ctx context.Context) error {
 
 	a.emit(Event{Type: "compress_start", Text: fmt.Sprintf("meringkas %d pesan…", len(toSummarize))})
 
-	summaryResp, err := a.Client.Chat(ctx, []llm.Message{
+	compressClient := a.resolveLLMForRole(tools.RoleSlow)
+	summaryResp, err := compressClient.Chat(ctx, []llm.Message{
 		{Role: llm.RoleSystem, Content: compressSystemPrompt},
 		{Role: llm.RoleUser, Content: summaryBlock},
 	}, nil)

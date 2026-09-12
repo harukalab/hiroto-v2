@@ -112,10 +112,9 @@ type llmFn struct {
 	Parameters  any    `json:"parameters"`
 }
 
-// ---------- built-in tools ----------
-
-// RegisterBuiltin wires up the default toolset (Hiroto's core tools).
 func RegisterBuiltin(r *Registry, opts Options) {
+	engine := NewRuleEngine()
+	engine.SetLLM(opts.RuleLLM)
 	registerTerminal(r, opts)
 	registerReadFile(r)
 	registerWriteFile(r, opts)
@@ -138,19 +137,42 @@ func RegisterBuiltin(r *Registry, opts Options) {
 	registerSessionSearch(r, opts)
 	registerMemory(r, opts)
 	registerTodo(r, opts)
-	registerSkillView(r, opts)
+	registerLSPFull(r)
+	registerDAP(r)
+	registerTask(r, opts)
+	registerStreamRules(r, engine)
+	registerModelRouting(r, opts.ModelRouter)
+	registerMemoryConsolidation(r, opts.MemoryPipeline)
+	if opts.Advisor != nil {
+		registerAdvisor(r, opts.Advisor)
+	}
+	if opts.KernelManager != nil {
+		registerKernels(r, opts.KernelManager)
+	}
+	if opts.CompactionEngine != nil {
+		registerCompaction(r, opts.CompactionEngine)
+	}
 }
 
 type Options struct {
-	TermTimeout   time.Duration
-	Workdir       string
-	WebSearch     func(query string, limit int) ([]SearchHit, error)
-	WebExtract    func(urls []string) ([]PageResult, error)
-	Memory        MemoryStore
-	Todo          *TodoStore
-	Skills        SkillIndex
-	SessionSearch SessionSearchFunc
-	LLMClient     LLMClient // for vision_analyze to call the model
+	TermTimeout    time.Duration
+	Workdir        string
+	WebSearch      func(query string, limit int) ([]SearchHit, error)
+	WebExtract     func(urls []string) ([]PageResult, error)
+	Memory         MemoryStore
+	Todo           *TodoStore
+	Skills         SkillIndex
+	SessionSearch  SessionSearchFunc
+	LLMClient      LLMClient // for vision_analyze to call the model
+	RuleLLM        RuleLLM   // full LLM interface for stream rules and other tools
+	TaskManager    *TaskManager
+	Reg            *Registry    // for task agent tool resolution
+	EmitFunc       func(Event)  // for task agent event emission
+	ModelRouter      *ModelRouter      // role-based model routing
+	KernelManager    *KernelManager    // persistent kernel manager
+	MemoryPipeline   *MemoryPipeline   // memory consolidation pipeline
+	CompactionEngine   *CompactionEngine   // context compression engine
+	Advisor          *AdvisorRuntime   // advisor model runtime
 }
 
 // LLMClient is a minimal interface for vision_analyze to call the LLM.
@@ -162,6 +184,19 @@ type LLMClient interface {
 type LLMMessage struct {
 	Role    string
 	Content string
+}
+
+// LLMTool is a simplified tool definition for the LLM client.
+type LLMTool struct {
+	Type     string         `json:"type"`
+	Function ToolDefinition `json:"function"`
+}
+
+// ToolDefinition holds the function schema for an LLM tool call.
+type ToolDefinition struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Parameters  any    `json:"parameters"`
 }
 
 type SearchHit struct {
@@ -270,21 +305,21 @@ func registerReadFile(r *Registry) {
 			"limit":  map[string]any{"type": "integer", "description": "Max lines (default 2000)"},
 		}, "path"),
 		Exec: func(ctx context.Context, args map[string]any) Result {
-					path, _ := args["path"].(string)
-					// Resolve relative paths against the current working directory
-					// and block reads of sensitive files (env, keys, tokens).
-					if abs, err := filepath.Abs(path); err == nil {
-						path = abs
-					}
-					if w := sensitivePath(path); w != "" {
-						// Allow --force for intentional access.
-						if strings.HasPrefix(path, "--force ") {
-							path = strings.TrimPrefix(path, "--force ")
-						} else {
-							return Result{Output: "BLOCKED: " + w + "\n\nGunakan --force untuk tetap membaca: read_file(path=\"--force " + path + "\")", IsError: true}
-						}
-					}
-					data, err := os.ReadFile(path)
+			path, _ := args["path"].(string)
+			// Resolve relative paths against the current working directory
+			// and block reads of sensitive files (env, keys, tokens).
+			if abs, err := filepath.Abs(path); err == nil {
+				path = abs
+			}
+			if w := sensitivePath(path); w != "" {
+				// Allow --force for intentional access.
+				if strings.HasPrefix(path, "--force ") {
+					path = strings.TrimPrefix(path, "--force ")
+				} else {
+					return Result{Output: "BLOCKED: " + w + "\n\nGunakan --force untuk tetap membaca: read_file(path=\"--force " + path + "\")", IsError: true}
+				}
+			}
+			data, err := os.ReadFile(path)
 			if err != nil {
 				return Result{Output: err.Error(), IsError: true}
 			}
@@ -347,7 +382,7 @@ func registerWriteFile(r *Registry, opts Options) {
 			if dir := filepath.Dir(path); dir != "" {
 				_ = os.MkdirAll(dir, 0o755)
 			}
-			autoCheckpoint(opts.Workdir)
+			autoCheckpoint(ctx, opts.Workdir)
 			before := ""
 			if old, err := os.ReadFile(path); err == nil {
 				before = string(old)
@@ -732,4 +767,27 @@ func sensitivePath(path string) string {
 		return "file mengandung kredensial"
 	}
 	return ""
+}
+
+// ---- LSP full operations ----
+
+func registerLSPFull(r *Registry) {
+	r.Register(&Tool{
+		Name:        "lsp_rename",
+		Description: "Rename a symbol across the workspace using gopls LSP. Requires gopls installed.",
+		Parameters:  mustJSON(`{"type":"object","properties":{"path":{"type":"string","description":"File path containing the symbol"},"position":{"type":"string","description":"JSON position object like '{\"line\":0,\"character\":0}'"},"newName":{"type":"string","description":"New name for the symbol"}},"required":["path","position","newName"]}`),
+		Exec:        lspRenameExec,
+	})
+	r.Register(&Tool{
+		Name:        "lsp_code_actions",
+		Description: "List and apply code actions at a position using gopls LSP.",
+		Parameters:  mustJSON(`{"type":"object","properties":{"path":{"type":"string","description":"File path"},"position":{"type":"string","description":"JSON position object like '{\"line\":0,\"character\":0}'"},"action":{"type":"string","description":"Action index (e.g. '0') or 'list' to list actions"}},"required":["path","position"]}`),
+		Exec:        lspCodeActionsExec,
+	})
+	r.Register(&Tool{
+		Name:        "lsp_symbols",
+		Description: "Search workspace symbols using gopls LSP. Returns matching symbol list with locations.",
+		Parameters:  mustJSON(`{"type":"object","properties":{"query":{"type":"string","description":"Search query for symbol names"},"limit":{"type":"integer","description":"Max results (default 50, max 200)"},"path":{"type":"string","description":"Optional scope path to filter results"}},"required":["query"]}`),
+		Exec:        lspSymbolsExec,
+	})
 }

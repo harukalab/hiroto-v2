@@ -217,7 +217,9 @@ func browserScreenshotCDP(ctx context.Context, args map[string]any) Result {
 	if err != nil {
 		return Result{Output: fmt.Sprintf("screenshot error: %v", err), IsError: true}
 	}
-	os.MkdirAll(strings.TrimSuffix(path, "/"+string(filepath.Base(path))), 0755)
+	if err := os.MkdirAll(strings.TrimSuffix(path, "/"+string(filepath.Base(path))), 0755); err != nil {
+		return Result{Output: fmt.Sprintf("screenshot mkdir error: %v", err), IsError: true}
+	}
 	if err := os.WriteFile(path, buf, 0644); err != nil {
 		return Result{Output: fmt.Sprintf("write error: %v", err), IsError: true}
 	}

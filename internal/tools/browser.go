@@ -67,7 +67,9 @@ func browserScreenshot(ctx context.Context, args map[string]any) Result {
 	ctx2, cancel := context.WithTimeout(ctx, time.Duration(timeout+5)*time.Second)
 	defer cancel()
 
-	os.MkdirAll(filepath.Dir(path), 0755)
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return Result{Output: fmt.Sprintf("screenshot mkdir error: %v", err), IsError: true}
+	}
 	chrome := chromePath()
 	cmd := exec.CommandContext(ctx2, chrome,
 		"--headless=new", "--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage",
@@ -140,14 +142,14 @@ func lspCheck(path string) string {
 	}
 	return ""
 }
-
-// autoCheckpoint creates a git snapshot before destructive operations.
-// It is silent on failure (no git repo, no changes, etc.).
-func autoCheckpoint(workdir string) {
-	exec.Command("git", "-C", workdir, "add", "-A").Run()
+func autoCheckpoint(ctx context.Context, workdir string) {
+	cmd := exec.CommandContext(ctx, "git", "-C", workdir, "add", "-A")
+	cmd.Run()
 	ts := time.Now().Format("2006-01-02 15:04:05")
-	exec.Command("git", "-C", workdir, "commit", "--allow-empty", "-m", "hiroto auto-checkpoint "+ts).Run()
+	cmd = exec.CommandContext(ctx, "git", "-C", workdir, "commit", "--allow-empty", "-m", "hiroto auto-checkpoint "+ts)
+	cmd.Run()
 }
+
 
 func htmlToText(s string) string {
 	s = strings.NewReplacer("<br>", "\n", "<br/>", "\n", "<br />", "\n", "<p>", "\n", "</p>", "\n", "<li>", "\n- ").Replace(s)

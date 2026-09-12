@@ -85,7 +85,7 @@ func (m *model) handleTodoCmd(fields []string) {
 	case "clear":
 		done, total := m.todos.Counts()
 		m.todos.Clear()
-		m.lines = append(m.lines, line{lineInfo, stMuted.Render(fmt.Sprintf("task list dihapus (%d/%d selesai)", done, total))})
+		m.lines = append(m.lines, line{lineInfo, stMuted.Render(fmt.Sprintf("task list cleared (%d/%d done)", done, total))})
 
 	default:
 		m.flashMsg(todoUsage, "error")
@@ -97,7 +97,7 @@ func (m *model) handleTodoCmd(fields []string) {
 func (m *model) showTodos() {
 	items := m.todos.Snapshot()
 	if len(items) == 0 {
-		m.lines = append(m.lines, line{lineInfo, stMuted.Render("belum ada task — " + todoUsage)})
+		m.lines = append(m.lines, line{lineInfo, stMuted.Render("no tasks — " + todoUsage)})
 		return
 	}
 	var b strings.Builder

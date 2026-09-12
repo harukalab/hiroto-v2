@@ -79,9 +79,13 @@ func executePython(ctx context.Context, args map[string]any) Result {
 
 	helper := filepath.Join(dir, "hiroto_tools.py")
 	script := filepath.Join(dir, "script.py")
-	os.WriteFile(helper, []byte(pythonHelper), 0644)
+	if err := os.WriteFile(helper, []byte(pythonHelper), 0644); err != nil {
+		return Result{Output: fmt.Sprintf("write helper: %v", err), IsError: true}
+	}
 	fullCode := fmt.Sprintf("import sys\nsys.path.insert(0, '.')\nfrom hiroto_tools import *\n%s", code)
-	os.WriteFile(script, []byte(fullCode), 0644)
+	if err := os.WriteFile(script, []byte(fullCode), 0644); err != nil {
+		return Result{Output: fmt.Sprintf("write script: %v", err), IsError: true}
+	}
 
 	ctx2, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()

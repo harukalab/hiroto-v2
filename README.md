@@ -57,7 +57,6 @@ hiroto                  # Interactive TUI
 hiroto -q "who am i?"   # One-shot, prints answer
 hiroto -c "prompt"      # Continue last session (one-shot)
 hiroto --resume <id>    # Reopen a saved session in the TUI
-hiroto gateway          # Telegram bot
 hiroto --api            # OpenAI-compatible API server
 hiroto --update         # Check for updates
 ```
@@ -156,21 +155,6 @@ Endpoints: `/v1/chat/completions`, `/v1/models`, `/health`.
 
 ---
 
-## Telegram gateway
-
-```bash
-hiroto gateway
-```
-
-On first run, you're prompted for a Telegram bot token (from @BotFather). The token is stored in `.env`, never in config.yaml. The bot supports:
-
-- Per-chat isolated conversations (no context leakage)
-- Live text + tool activity streaming
-- Persistent sessions (survive restarts, resume via `/resume`)
-- Full command set: `/model` `/resume` `/memory` `/skills` `/retry` `/undo` `/status` `/sessions`
-
----
-
 ## What it can do
 
 **Terminal & files:** shell commands, read, write, edit, background processes, pipe chaining. LSP diagnostics auto-run after writes (go vet, py_compile, cargo check, tsc).
@@ -225,7 +209,7 @@ antislop  → anti-AI-slop output filter
 ## Project layout
 
 ```
-cmd/hiroto/          Entry point: TUI, one-shot, gateway, API server
+cmd/hiroto/          Entry point: TUI, one-shot, API server
 internal/
   agent/             Agent loop, system prompt, compression, steer
   api/               OpenAI-compatible HTTP server
@@ -237,7 +221,6 @@ internal/
   config/            YAML config + .env resolver
   web/               Web search + extract
   plugin/            Plugin loader + MCP client
-  gateway/           Telegram bot
 skills/              240+ bundled skills
 ```
 
@@ -270,6 +253,4 @@ See [CONTRIBUTING.md](CONTRIBUTING.md). Security reports: [SECURITY.md](SECURITY
 
 MIT — [LICENSE](LICENSE)
 
----
-
-Built from scratch in Go. 24MB binary. 240+ skills. 26 tools. 31 slash commands. API server. Telegram gateway. No AI framework dependencies.
+Built from scratch in Go. 24MB binary. 240+ skills. 26 tools. 31 slash commands. API server. No AI framework dependencies.

@@ -55,6 +55,16 @@ Hermes-parity pass across the TUI and Telegram gateway.
 
 ## Unreleased
 
+## Gateway Telegram dihapus
+- `hiroto gateway` CLI subcommand dan `runGateway()` dihapus
+- `internal/gateway/` seluruh file (telegram.go, todo.go + tests) dihapus
+- `Config.Gateway` struct dan `GatewayToken()` / `AllowedUsers()` methods dihapus dari `internal/config`
+- `SaveGatewayToken()` dihapus dari `internal/config/save.go`
+- Import `github.com/go-telegram-bot-api/telegram-bot-api/v5` dihapus dari go.mod
+- Referensi Telegram gateway dihapus dari komentar (activity.go, activity_test.go, main.go)
+- /config slash command tidak lagi menampilkan field gateway
+- README, install.sh diupdate
+
 ### Layout (fix: garis atas banner hilang)
 - Frame TUI kini dijamin pas sama tinggi terminal: chrome layout diukur dari satu sumber (`layoutParts`), slot kosong (clarify/flash/panel) gak lagi ngeluarin baris hantu, jadi garis rule di atas wordmark HIROTO balik tampil di semua ukuran terminal
 

@@ -4,9 +4,9 @@ package main
 // streaming assistant text, tool activity lines, spinners, session log.
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
+	"math"
 	"fmt"
 	"io"
 	"log"
@@ -20,7 +20,6 @@ import (
 	"github.com/hirotomasato/hiroto/internal/agent"
 	"github.com/hirotomasato/hiroto/internal/api"
 	"github.com/hirotomasato/hiroto/internal/config"
-	"github.com/hirotomasato/hiroto/internal/gateway"
 	"github.com/hirotomasato/hiroto/internal/llm"
 	"github.com/hirotomasato/hiroto/internal/memory"
 	"github.com/hirotomasato/hiroto/internal/plugin"
@@ -56,18 +55,37 @@ var (
 	stToolTag = lipgloss.NewStyle().Foreground(cTool)
 	stMuted   = lipgloss.NewStyle().Foreground(cMuted)
 	stErr     = lipgloss.NewStyle().Foreground(cErr)
-	stInput   = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(cBgFaint).Padding(0, 1)
+
+	// Input area — clean border, no rounded corners (like OMP box style).
+	stInput = lipgloss.NewStyle().
+		Border(lipgloss.NormalBorder()).
+		BorderTop(true).BorderLeft(true).BorderRight(true).
+		BorderForeground(cBgFaint).
+		Padding(0, 1)
+
 	stHelp    = lipgloss.NewStyle().Foreground(cMuted)
 
 	stDiffAdd  = lipgloss.NewStyle().Foreground(cDiffAdd)
 	stDiffDel  = lipgloss.NewStyle().Foreground(cDiffDel)
 	stDiffHunk = lipgloss.NewStyle().Foreground(cDiffHunk)
 
-	// Flash card (floating error/info popup — Hermes-style).
-	stFlashErr  = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(cErr).Padding(0, 1).Foreground(cErr)
-	stFlashInfo = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(cPrimary).Padding(0, 1).Foreground(cPrimary)
-)
+	// Flash card — clean bordered box, no padding.
+	stFlashErr  = lipgloss.NewStyle().Border(lipgloss.NormalBorder()).BorderForeground(cErr).Padding(0, 1).Foreground(cErr)
+	stFlashInfo = lipgloss.NewStyle().Border(lipgloss.NormalBorder()).BorderForeground(cPrimary).Padding(0, 1).Foreground(cPrimary)
 
+	// Todo panel — bordered box.
+	stTodoBorder = lipgloss.NewStyle().Border(lipgloss.NormalBorder()).BorderForeground(cBgFaint).Padding(0, 1)
+
+	// Clarify question — prominent banner-style line.
+	stClarify = lipgloss.NewStyle().
+		Foreground(cPrimary).
+		Bold(true).
+		Padding(0, 1).
+		Border(lipgloss.NormalBorder()).
+		BorderTop(true).
+		BorderBottom(true).
+		BorderForeground(cBgFaint)
+)
 // ---------- model ----------
 type lineKind int
 
@@ -156,7 +174,11 @@ func initialModel(cfg *config.Config, ag *agent.Agent, mem *memory.Store, ss *se
 	ta.CharLimit = 8000
 	ta.SetHeight(2)
 	ta.Focus()
-	sp := spinner.New(spinner.WithSpinner(spinner.MiniDot), spinner.WithStyle(lipgloss.NewStyle().Foreground(cPrimary)))
+	sp := spinner.New(
+		spinner.WithSpinner(spinner.Dot),
+		spinner.WithStyle(lipgloss.NewStyle().Foreground(cPrimary)),
+	)
+	sp.Spinner.FPS = 100 * time.Millisecond
 	m := model{cfg: cfg, ag: ag, mem: mem, sessStore: ss, sessID: newSessionID(), input: ta, spinner: sp, histIdx: -1, startedAt: time.Now(), todos: tools.SharedTodo()}
 	// Bind the checklist to this session (and export HIROTO_SESSION so a child
 	// `hiroto tool todo` process writes the same file). A fresh session starts
@@ -187,7 +209,7 @@ func (m *model) banner() {
 	// Check for updates on startup
 	go func() {
 		if latest, ok := checkUpdate(); ok {
-			streamCh <- eventMsg(agent.Event{Type: "error", Text: "◆ update tersedia: v" + latest + " — ketik /upgrade"})
+			streamCh <- eventMsg(agent.Event{Type: "notice", Text: "upgrade tersedia: v" + latest + " — ketik /upgrade"})
 		}
 	}()
 }
@@ -209,6 +231,8 @@ func (m *model) renderAgentEvent(e agent.Event) line {
 		return line{lineTool, head + "\n" + m.renderToolBody(body)}
 	case "compress_start", "compress_end":
 		return line{lineInfo, stMuted.Render("⚡ " + e.Text)}
+	case "notice":
+		return line{lineInfo, stMuted.Render("ℹ " + e.Text)}
 	case "error":
 		return line{lineError, stErr.Render("✗ " + e.Text)}
 	}
@@ -292,9 +316,8 @@ func colorizeDiff(s string) string {
 }
 
 // toolActivity turns a tool call into a short, natural activity phrase —
-// Hermes-style ("Reading main.go", "Running the tests"). Delegates to the
-// shared agent.ActivityLabel so the TUI and the Telegram gateway narrate tool
-// activity identically.
+// Hermes-style ("Reading main.go", "Running the tests"), delegating to
+// the shared agent.ActivityLabel.
 func toolActivity(name, rawArgs string) string {
 	return agent.ActivityLabel(name, rawArgs)
 }
@@ -319,9 +342,6 @@ func (m *model) renderTodoPanel() string {
 			done++
 		}
 	}
-	// Keep the active task visible: when the list is longer than the cap,
-	// window around the in_progress item instead of always showing the head
-	// (otherwise a 20-task plan hides the one task that's actually running).
 	const maxRows = 8
 	shown := items
 	hiddenBefore, hiddenAfter := 0, 0
@@ -344,13 +364,18 @@ func (m *model) renderTodoPanel() string {
 		hiddenAfter = len(items) - start - maxRows
 	}
 	var b strings.Builder
-	head := fmt.Sprintf("Tasks %d/%d", done, len(items))
+	progress := float64(0)
+	if len(items) > 0 {
+		progress = float64(done) / float64(len(items))
+	}
+	bar := renderProgressBar(progress)
+	head := fmt.Sprintf("Tasks %d/%d  %s", done, len(items), bar)
 	if !m.busy && done < len(items) {
-		head += "  ·  /todo untuk kelola"
+		head += "  ·  /todo"
 	}
 	b.WriteString(stDiffHunk.Render(head) + "\n")
 	if hiddenBefore > 0 {
-		b.WriteString(stHelp.Render(fmt.Sprintf("  … %d selesai di atas", hiddenBefore)) + "\n")
+		b.WriteString(stHelp.Render(fmt.Sprintf("  ┆ %d done above", hiddenBefore)) + "\n")
 	}
 	for _, it := range shown {
 		var mark, txt string
@@ -362,8 +387,6 @@ func (m *model) renderTodoPanel() string {
 			mark = stBanner.Render("▶")
 			txt = stBanner.Render(it.Content)
 			if !m.busy {
-				// Nothing is running, yet a task claims to be: say so instead
-				// of letting the user stare at a spinner-less "in progress".
 				txt += stHelp.Render("  (idle)")
 			}
 		case tools.StatusCancelled:
@@ -376,7 +399,7 @@ func (m *model) renderTodoPanel() string {
 		b.WriteString("  " + mark + " " + txt + "\n")
 	}
 	if hiddenAfter > 0 {
-		b.WriteString(stHelp.Render(fmt.Sprintf("  … +%d lagi", hiddenAfter)) + "\n")
+		b.WriteString(stHelp.Render(fmt.Sprintf("  ┆ +%d more", hiddenAfter)) + "\n")
 	}
 	return lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
@@ -384,14 +407,32 @@ func (m *model) renderTodoPanel() string {
 		Padding(0, 1).
 		Render(strings.TrimRight(b.String(), "\n"))
 }
-
+// renderProgressBar draws a compact text-based progress bar.
+func renderProgressBar(pct float64) string {
+	pct = math.Max(0, math.Min(1, pct))
+	w := 16
+	filled := int(math.Round(pct * float64(w)))
+	if filled > w {
+		filled = w
+	}
+	var b strings.Builder
+	for i := range w {
+		if i < filled {
+			b.WriteString("█")
+		} else {
+			b.WriteString("░")
+		}
+	}
+	pctStr := fmt.Sprintf("%.0f%%", pct*100)
+	padded := strings.Repeat(" ", w-len(pctStr)) + pctStr
+	return lipgloss.NewStyle().Foreground(cPrimary).Render(b.String()) + " " + lipgloss.NewStyle().Foreground(cMuted).Render(padded)
+}
 func minInt(a, b int) int {
 	if a < b {
 		return a
 	}
 	return b
 }
-
 func (m *model) runTurn(text string) {
 	m.busy = true
 	m.input.Placeholder = "agent sibuk — ketik untuk mengarahkan…"
@@ -401,7 +442,7 @@ func (m *model) runTurn(text string) {
 	m.saveSession()
 	ctx, cancel := context.WithCancel(context.Background())
 	m.cancel = cancel
-	// Steer channel: buffer of 1 so /steer doesn't block.
+	// Steer channel: buffer of 1 so /steer doesn't doesn't block.
 	m.steerCh = make(chan string, 1)
 	m.ag.SteerCh = m.steerCh
 	go func() {
@@ -427,7 +468,6 @@ var (
 	mdRender *glamour.TermRenderer
 	mdWidth  int
 )
-
 // mdRenderer returns a markdown renderer for the given wrap width. Uses the
 // "dark" style explicitly (not WithAutoStyle) so code blocks get chroma syntax
 // highlighting even when TTY detection is unreliable under the altscreen.
@@ -672,7 +712,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case tea.KeyCtrlS:
 			m.saveSession()
-			m.lines = append(m.lines, line{lineInfo, stMuted.Render("sesi disimpan")})
+			m.lines = append(m.lines, line{lineInfo, stMuted.Render("session saved")})
 			m.refresh()
 			return m, nil
 		}
@@ -833,7 +873,7 @@ func (m *model) sendSteer(text string) {
 	case m.steerCh <- msg:
 		m.lines = append(m.lines, line{lineInfo, stMuted.Render("steer: " + msg)})
 	default:
-		m.flashMsg("steer: channel penuh, coba lagi", "error")
+		m.flashMsg("steer: channel full, try again", "error")
 	}
 }
 
@@ -860,7 +900,7 @@ func (m *model) handleSubmit(text string) (tea.Model, tea.Cmd) {
 			if m.todos != nil {
 				m.todos.Retarget(m.sessID)
 			}
-			m.lines = append(m.lines, line{lineInfo, stMuted.Render("— sesi baru —")})
+			m.lines = append(m.lines, line{lineInfo, stMuted.Render("— new session —")})
 		case "/resume":
 			m.openResumePicker()
 		case "/compress":
@@ -901,7 +941,7 @@ func (m *model) handleSubmit(text string) (tea.Model, tea.Cmd) {
 			if len(fields) >= 2 {
 				m.cfg.Model.Name = fields[1]
 				m.ag.Client.Model = fields[1]
-				m.lines = append(m.lines, line{lineInfo, stMuted.Render("model sesi ini: " + fields[1] + " (permanen: edit model: di ~/.hiroto/config.yaml)")})
+				m.lines = append(m.lines, line{lineInfo, stMuted.Render("model for this session: " + fields[1] + " (permanent: edit model: in ~/.hiroto/config.yaml)")})
 			} else {
 				m.openModelPicker()
 			}
@@ -910,7 +950,7 @@ func (m *model) handleSubmit(text string) (tea.Model, tea.Cmd) {
 				content := strings.TrimSpace(strings.TrimPrefix(text, "/memory add"))
 				if content != "" {
 					id := m.mem.Add("memory", content)
-					m.lines = append(m.lines, line{lineInfo, stMuted.Render("memory tersimpan: " + id)})
+					m.lines = append(m.lines, line{lineInfo, stMuted.Render("memory saved: " + id)})
 				}
 			} else if len(fields) >= 3 && fields[1] == "del" {
 				ok := m.mem.Remove("memory", fields[2])
@@ -947,7 +987,7 @@ func (m *model) handleSubmit(text string) (tea.Model, tea.Cmd) {
 				case m.steerCh <- msg:
 					m.lines = append(m.lines, line{lineInfo, stMuted.Render("steer: " + msg)})
 				default:
-					m.flashMsg("steer: channel penuh, coba lagi", "error")
+					m.flashMsg("steer: channel full, try again", "error")
 				}
 			} else {
 				m.flashMsg("agent sedang tidak sibuk", "info")
@@ -1057,7 +1097,7 @@ func (m *model) handleSubmit(text string) (tea.Model, tea.Cmd) {
 					}
 				}
 				m.saveSession()
-				m.lines = append(m.lines, line{lineInfo, stMuted.Render("sesi: " + m.sessID)})
+				m.lines = append(m.lines, line{lineInfo, stMuted.Render("session: " + m.sessID)})
 			}
 		case "/reload":
 			// Re-scan skills directory.
@@ -1108,7 +1148,6 @@ func (m *model) handleSubmit(text string) (tea.Model, tea.Cmd) {
 			b.WriteString(fmt.Sprintf("base_url: %s\n", cfg.Model.BaseURL))
 			b.WriteString(fmt.Sprintf("max_turns: %d\n", cfg.Agent.MaxTurns))
 			b.WriteString(fmt.Sprintf("skills: %d\n", len(m.ag.Skills)))
-			b.WriteString(fmt.Sprintf("gateway: %v\n", cfg.Gateway.TelegramToken != ""))
 			m.lines = append(m.lines, line{lineInfo, stMuted.Render("◆ config\n" + b.String())})
 		case "/reasoning":
 			if len(fields) < 2 {
@@ -1359,12 +1398,6 @@ func main() {
 		return
 	}
 
-	// hiroto gateway  — start Telegram bot (and future WhatsApp)
-	if len(os.Args) >= 2 && os.Args[1] == "gateway" {
-		runGateway(cfg, mem)
-		return
-	}
-
 	// hiroto --api  — start OpenAI-compatible API server
 	if len(os.Args) >= 2 && os.Args[1] == "--api" {
 		runAPI(cfg, mem)
@@ -1471,6 +1504,27 @@ func buildAgent(cfg *config.Config, mem *memory.Store) *agent.Agent {
 		RetryAttempts:     2,
 		Workdir:           workdir(),
 	}
+	modelRouter := tools.NewModelRouterWithOptions(tools.RouterOptions{
+		DefaultProvider: "default",
+		ProviderBaseURL: cfg.Model.BaseURL,
+	})
+	if cfg.Model.Name != "" {
+		_ = modelRouter.SetRoute(tools.RoleDefault, tools.ModelRoute{
+			Role:     tools.RoleDefault,
+			Model:    cfg.Model.Name,
+			Provider: "default",
+			Level:    "standard",
+		})
+	}
+	// Create the advisor runtime — a second model watching the primary session.
+	advisor := tools.NewAdvisorRuntime(
+		tools.AdvisorConfig{
+			Enabled: true,
+			Model:   cfg.Model.Name,
+		},
+		&llmAdapter{client: llm.New(cfg.Model.BaseURL, cfg.APIKey(), cfg.Model.Name)},
+		nil, // toolSession not yet available at build time
+	)
 	// Model list is fetched asynchronously after the TUI boots (see
 	// fetchModelsCmd). The 10s timeout used to block startup so the
 	// user would stare at a blank screen while waiting for the proxy.
@@ -1501,8 +1555,12 @@ func buildAgent(cfg *config.Config, mem *memory.Store) *agent.Agent {
 			return session.New().Search(q)
 		},
 		LLMClient: &llmAdapter{client: llm.New(cfg.Model.BaseURL, cfg.APIKey(), cfg.Model.Name)},
+		ModelRouter:   modelRouter,
+		Advisor:       advisor,
 	})
 	ag.Reg = reg
+	ag.ModelRouter = modelRouter
+	ag.Advisor = advisor
 
 	// Load plugins and MCP servers.
 	pluginDirs := cfg.Plugins.Dirs
@@ -1600,42 +1658,6 @@ func runToolCmd(name string) {
 	fmt.Println(string(out))
 }
 
-// runGateway starts the Telegram bot (and future WhatsApp) if configured.
-func runGateway(cfg *config.Config, mem *memory.Store) {
-	token := cfg.GatewayToken()
-	if token == "" {
-		// Setup wizard: prompt for the token, then persist it to ~/.hiroto/.env.
-		fmt.Print("◆ Setup gateway — Token bot Telegram (dari @BotFather): ")
-		scanner := bufio.NewScanner(os.Stdin)
-		if !scanner.Scan() {
-			fmt.Fprintln(os.Stderr, "hiroto: input dibatalkan")
-			os.Exit(1)
-		}
-		token = strings.TrimSpace(scanner.Text())
-		if token == "" {
-			fmt.Fprintln(os.Stderr, "hiroto: token tidak boleh kosong")
-			os.Exit(1)
-		}
-		if err := config.SaveGatewayToken(token); err != nil {
-			fmt.Fprintln(os.Stderr, "hiroto: gagal simpan token:", err)
-			os.Exit(1)
-		}
-		fmt.Println("✓ token tersimpan di ~/.hiroto/.env (HIROTO_TELEGRAM_TOKEN)")
-	}
-	ag := buildAgent(cfg, mem)
-	fmt.Println("◆ Hiroto gateway — Telegram bot berjalan…")
-	typing := true
-	if cfg.Gateway.TypingIndicator != nil {
-		typing = *cfg.Gateway.TypingIndicator
-	}
-	opts := gateway.Options{
-		ToolProgress:    cfg.Gateway.ToolProgress,
-		CleanupProgress: cfg.Gateway.CleanupProgress,
-		TypingIndicator: typing,
-		AllowedUsers:    cfg.AllowedUsers(),
-	}
-	log.Fatal(gateway.Telegram(token, ag, opts))
-}
 
 // runAPI starts the OpenAI-compatible API server.
 func runAPI(cfg *config.Config, mem *memory.Store) {

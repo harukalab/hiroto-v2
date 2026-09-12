@@ -110,6 +110,10 @@ type Agent struct {
 	CompressKeepTurns int // recent turns to keep intact (default 6)
 	RetryAttempts     int // auto-retry on provider errors (default 2)
 
+	// Advisor is the secondary advisor model watching the primary session.
+	Advisor *tools.AdvisorRuntime
+	ModelRouter  *tools.ModelRouter // role-based model routing
+
 	Messages  []llm.Message
 	Emit      func(Event) // UI callback
 	SteerCh   chan string // injected mid-turn: read after each tool call
@@ -219,22 +223,24 @@ func (a *Agent) Run(ctx context.Context, userText string, onText func(string)) (
 	a.Messages = append(a.Messages, llm.Message{Role: llm.RoleUser, Content: userText})
 
 	toolDefs := llmTools(a.Reg)
+	// Use the ModelRouter when available so that role-based routing applies.
+	chatClient := a.resolveLLM()
 	var final string
 
-	for turn := 0; turn < maxInt(a.MaxTurns, 1); turn++ {
+	for turn := range maxInt(a.MaxTurns, 1) {
 		// Try streaming first for visible typing; fall back to blocking call.
 		// Auto-retry on transient provider errors.
 		var assistant llm.Message
 		var streamErr error
-		for attempt := 0; attempt <= a.RetryAttempts; attempt++ {
+		for attempt := range a.RetryAttempts + 1 {
 			if attempt > 0 {
 				a.emit(Event{Type: "error", Text: fmt.Sprintf("retry %d/%d…", attempt, a.RetryAttempts)})
 				time.Sleep(time.Duration(attempt) * time.Second)
 			}
 			if onText != nil {
-				assistant, streamErr = a.Client.Stream(ctx, a.Messages, toolDefs, onText)
+				assistant, streamErr = chatClient.Stream(ctx, a.Messages, toolDefs, onText)
 			} else {
-				assistant, streamErr = a.Client.Chat(ctx, a.Messages, toolDefs)
+				assistant, streamErr = chatClient.Chat(ctx, a.Messages, toolDefs)
 			}
 			if streamErr != nil {
 				select {
@@ -245,7 +251,7 @@ func (a *Agent) Run(ctx context.Context, userText string, onText func(string)) (
 				// Stream failed; try Chat as a fallback (only when
 				// we were streaming — the else branch already did Chat).
 				if onText != nil {
-					assistant, streamErr = a.Client.Chat(ctx, a.Messages, toolDefs)
+					assistant, streamErr = chatClient.Chat(ctx, a.Messages, toolDefs)
 				}
 				if streamErr != nil {
 					if attempt < a.RetryAttempts {
@@ -273,6 +279,7 @@ func (a *Agent) Run(ctx context.Context, userText string, onText func(string)) (
 				final = s
 			}
 			a.Messages = append(a.Messages, assistant)
+			a.emitAdvisorDelta(assistant)
 			return final, nil
 		}
 
@@ -290,11 +297,15 @@ func (a *Agent) Run(ctx context.Context, userText string, onText func(string)) (
 
 		// Run the tool calls (parallel when >1, order-preserving results).
 		a.Messages = append(a.Messages, a.executeToolCalls(ctx, assistant.ToolCalls)...)
+		a.emitAdvisorDeltaBatch(a.Messages[len(a.Messages)-len(a.executeToolCalls(ctx, assistant.ToolCalls)):])
+		// Advisor review: check for advisory notes about this turn.
+		a.runAdvisorReview(turn)
 	}
 	// Turn budget exhausted: tell the model to wrap up.
 	wrap := llm.Message{Role: llm.RoleUser, Content: "Turn budget reached. Summarize what was accomplished and what remains, without further tool calls."}
+	a.emitAdvisorDelta(wrap)
 	a.Messages = append(a.Messages, wrap)
-	msg, err := a.Client.Chat(ctx, a.Messages, nil)
+	msg, err := chatClient.Chat(ctx, a.Messages, nil)
 	if err != nil {
 		return final, err
 	}
@@ -302,6 +313,7 @@ func (a *Agent) Run(ctx context.Context, userText string, onText func(string)) (
 		final = s
 	}
 	a.Messages = append(a.Messages, msg)
+	a.emitAdvisorDelta(msg)
 	return final, nil
 }
 
@@ -383,9 +395,11 @@ func (a *Agent) executeToolCalls(ctx context.Context, calls []llm.ToolCall) []ll
 // Used by steer injection: the steer message is already appended to Messages.
 func (a *Agent) continueRun(ctx context.Context, onText func(string)) (string, error) {
 	toolDefs := llmTools(a.Reg)
+	// Use the ModelRouter when available so that role-based routing applies.
+	chatClient := a.resolveLLM()
 	var final string
 
-	for turn := 0; turn < maxInt(a.MaxTurns, 1); turn++ {
+	for turn := range maxInt(a.MaxTurns, 1) {
 		select {
 		case <-ctx.Done():
 			return final, ctx.Err()
@@ -394,15 +408,15 @@ func (a *Agent) continueRun(ctx context.Context, onText func(string)) (string, e
 
 		var assistant llm.Message
 		var streamErr error
-		for attempt := 0; attempt <= a.RetryAttempts; attempt++ {
+		for attempt := range a.RetryAttempts + 1 {
 			if attempt > 0 {
 				a.emit(Event{Type: "error", Text: fmt.Sprintf("retry %d/%d…", attempt, a.RetryAttempts)})
 				time.Sleep(time.Duration(attempt) * time.Second)
 			}
 			if onText != nil {
-				assistant, streamErr = a.Client.Stream(ctx, a.Messages, toolDefs, onText)
+				assistant, streamErr = chatClient.Stream(ctx, a.Messages, toolDefs, onText)
 			} else {
-				assistant, streamErr = a.Client.Chat(ctx, a.Messages, toolDefs)
+				assistant, streamErr = chatClient.Chat(ctx, a.Messages, toolDefs)
 			}
 			if streamErr != nil {
 				select {
@@ -412,7 +426,7 @@ func (a *Agent) continueRun(ctx context.Context, onText func(string)) (string, e
 				}
 				// Stream failed; try Chat as a fallback.
 				if onText != nil {
-					assistant, streamErr = a.Client.Chat(ctx, a.Messages, toolDefs)
+					assistant, streamErr = chatClient.Chat(ctx, a.Messages, toolDefs)
 				}
 				if streamErr != nil {
 					if attempt < a.RetryAttempts {
@@ -434,10 +448,12 @@ func (a *Agent) continueRun(ctx context.Context, onText func(string)) (string, e
 				final = s
 			}
 			a.Messages = append(a.Messages, assistant)
+			a.emitAdvisorDelta(assistant)
 			return final, nil
 		}
 
-		a.Messages = append(a.Messages, assistant)
+	a.emitAdvisorDelta(assistant)
+	a.Messages = append(a.Messages, assistant)
 
 		// Check for steer injection before running the batch.
 		select {
@@ -449,10 +465,13 @@ func (a *Agent) continueRun(ctx context.Context, onText func(string)) (string, e
 		}
 
 		a.Messages = append(a.Messages, a.executeToolCalls(ctx, assistant.ToolCalls)...)
+		a.emitAdvisorDeltaBatch(a.Messages[len(a.Messages)-len(a.executeToolCalls(ctx, assistant.ToolCalls)):])
+		a.runAdvisorReview(turn)
 	}
 	wrap := llm.Message{Role: llm.RoleUser, Content: "Turn budget reached. Summarize what was accomplished and what remains, without further tool calls."}
 	a.Messages = append(a.Messages, wrap)
-	msg, err := a.Client.Chat(ctx, a.Messages, nil)
+	a.emitAdvisorDelta(wrap)
+	msg, err := chatClient.Chat(ctx, a.Messages, nil)
 	if err != nil {
 		return final, err
 	}
@@ -460,5 +479,147 @@ func (a *Agent) continueRun(ctx context.Context, onText func(string)) (string, e
 		final = s
 	}
 	a.Messages = append(a.Messages, msg)
+	a.emitAdvisorDelta(msg)
 	return final, nil
+}
+
+// emitAdvisorDelta sends a transcript delta to the advisor for monitoring.
+func (a *Agent) emitAdvisorDelta(msg llm.Message) {
+	if a.Advisor == nil {
+		return
+	}
+	// Extract text content from the message for the advisor.
+	var text string
+	if s, ok := msg.Content.(string); ok {
+		text = s
+	}
+	if text == "" {
+		return
+	}
+	a.Advisor.Update(text)
+}
+
+// emitAdvisorDeltaBatch sends a batch of tool-result deltas to the advisor.
+func (a *Agent) emitAdvisorDeltaBatch(msgs []llm.Message) {
+	if a.Advisor == nil {
+		return
+	}
+	for _, msg := range msgs {
+		a.emitAdvisorDelta(msg)
+	}
+}
+
+// fallbackClient wraps *llm.Client to satisfy tools.ModelLLM.
+type fallbackClient struct{ client *llm.Client }
+
+func (f *fallbackClient) Chat(ctx context.Context, messages []tools.LLMMessage) (string, error) {
+	llmMsgs := make([]llm.Message, len(messages))
+	for i, m := range messages {
+		llmMsgs[i] = llm.Message{
+			Role:    llm.Role(m.Role),
+			Content: m.Content,
+		}
+	}
+	resp, err := f.client.Chat(ctx, llmMsgs, nil)
+	if err != nil {
+		return "", err
+	}
+	if s, ok := resp.Content.(string); ok {
+		return s, nil
+	}
+	return fmt.Sprintf("%v", resp.Content), nil
+}
+
+func (f *fallbackClient) Stream(ctx context.Context, messages []tools.LLMMessage, tools []tools.LLMTool, onText func(string)) (string, error) {
+	llmMsgs := make([]llm.Message, len(messages))
+	for i, m := range messages {
+		llmMsgs[i] = llm.Message{
+			Role:    llm.Role(m.Role),
+			Content: m.Content,
+		}
+	}
+	llmTools := make([]llm.Tool, len(tools))
+	for i, t := range tools {
+		llmTools[i] = llm.Tool{
+			Type: t.Type,
+			Function: llm.ToolDefinition{
+				Name:        t.Function.Name,
+				Description: t.Function.Description,
+				Parameters:  t.Function.Parameters,
+			},
+		}
+	}
+	resp, err := f.client.Stream(ctx, llmMsgs, llmTools, onText)
+	if err != nil {
+		return "", err
+	}
+	if s, ok := resp.Content.(string); ok {
+		return s, nil
+	}
+	return fmt.Sprintf("%v", resp.Content), nil
+}
+
+
+// resolveLLM returns an *llm.Client routed through the ModelRouter for
+// RoleDefault, falling back to the agent's default Client.
+func (a *Agent) resolveLLM() *llm.Client {
+	if a.ModelRouter == nil {
+		return a.Client
+	}
+	if c, err := a.ModelRouter.Resolve(tools.RoleDefault); err == nil {
+		if cc, ok := c.(*tools.ClientCache); ok {
+			return cc.GetClient()
+		}
+	}
+	return a.Client
+}
+
+// resolveLLMForRole returns an *llm.Client routed through the ModelRouter for
+// the given role, falling back to the agent's default Client.
+func (a *Agent) resolveLLMForRole(role tools.ModelRole) *llm.Client {
+	if a.ModelRouter == nil {
+		return a.Client
+	}
+	if c, err := a.ModelRouter.Resolve(role); err == nil {
+		if cc, ok := c.(*tools.ClientCache); ok {
+			return cc.GetClient()
+		}
+	}
+	return a.Client
+
+}
+// runAdvisorReview runs a review cycle on the advisor and emits advisories
+// that pass the emission guard and immunity check.
+func (a *Agent) runAdvisorReview(turn int) {
+	if a.Advisor == nil {
+		return
+	}
+	// Skip review if advisor is not enabled.
+	if !a.Advisor.Config.Enabled {
+		return
+	}
+	// Decrement immunity counter.
+	a.Advisor.DecrementImmuneTurns()
+	// Only review if not immune (or immune has expired).
+	if a.Advisor.IsImmune() {
+		return
+	}
+	advisory, err := a.Advisor.Review("")
+	if err != nil {
+		a.emit(Event{Type: "error", Text: "advisor review error: " + err.Error()})
+		return
+	}
+	if advisory == nil {
+		return
+	}
+	// Emit advisory into transcript.
+	if emitErr := a.Advisor.Emit(advisory); emitErr != nil {
+		a.emit(Event{Type: "error", Text: "advisor emit error: " + emitErr.Error()})
+		return
+	}
+	// Replenish immunity for concern/blocker.
+	if advisory.Severity == tools.SeverityConcern || advisory.Severity == tools.SeverityBlocker {
+		a.Advisor.SetImmuneTurns(1)
+	}
+	a.emit(Event{Type: "turn", Text: fmt.Sprintf("advisor [%s]: %s", advisory.Severity, advisory.Text)})
 }

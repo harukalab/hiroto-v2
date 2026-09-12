@@ -153,11 +153,11 @@ func sessionDisplay(list []session.Session) (display, ids []string) {
 func (m *model) openResumePicker() {
 	list := m.sessStore.List()
 	if len(list) == 0 {
-		m.lines = append(m.lines, line{lineInfo, stMuted.Render("belum ada sesi tersimpan")})
+		m.lines = append(m.lines, line{lineInfo, stMuted.Render("no saved sessions")})
 		return
 	}
 	display, ids := sessionDisplay(list)
-	m.picker = newPicker("lanjutkan sesi", display, ids, func(mm *model, id string) {
+	m.picker = newPicker("resume session", display, ids, func(mm *model, id string) {
 		mm.loadSessionByID(id)
 	})
 }
@@ -166,7 +166,7 @@ func (m *model) openResumePicker() {
 func (m *model) loadSessionByID(id string) bool {
 	sess, err := m.sessStore.Load(id)
 	if err != nil {
-		m.lines = append(m.lines, line{lineError, stErr.Render("gagal memuat sesi: " + err.Error())})
+		m.lines = append(m.lines, line{lineError, stErr.Render("failed to load session: " + err.Error())})
 		m.refresh()
 		return false
 	}
@@ -180,9 +180,9 @@ func (m *model) loadSessionByID(id string) bool {
 		m.ag.Reasoning = sess.Reasoning
 	}
 	restoreTodos(m.todos, sess)
-	m.lines = append(m.lines, line{lineInfo, stMuted.Render("sesi dilanjutkan: " + sess.ID + " · " + sess.Title)})
+	m.lines = append(m.lines, line{lineInfo, stMuted.Render("session resumed: " + sess.ID + " · " + sess.Title)})
 	if done, total := m.todos.Counts(); total > 0 {
-		m.lines = append(m.lines, line{lineInfo, stMuted.Render(fmt.Sprintf("task list dipulihkan: %d/%d selesai", done, total))})
+		m.lines = append(m.lines, line{lineInfo, stMuted.Render(fmt.Sprintf("task list restored: %d/%d done", done, total))})
 	}
 	m.refresh()
 	return true
@@ -209,7 +209,7 @@ func (m *model) openModelPicker() {
 		mm.ag.Client.Model = name
 		mm.cfg.Model.Name = name
 		config.SaveModel(name)
-		mm.lines = append(mm.lines, line{lineInfo, stMuted.Render("model: " + name + " (tersimpan)")})
+		mm.lines = append(mm.lines, line{lineInfo, stMuted.Render("model: " + name + " (saved)")})
 	})
 	m.picker.setHeaders(headers)
 }
@@ -326,7 +326,7 @@ func runResumeTUI(cfg *config.Config, mem *memory.Store, id string) error {
 	ss := session.New()
 	sess, err := ss.Load(id)
 	if err != nil {
-		return fmt.Errorf("sesi %q tidak ditemukan: %w", id, err)
+		return fmt.Errorf("session %q not found: %w", id, err)
 	}
 	ag := buildAgent(cfg, mem)
 	ag.Messages = fromStored(sess.Messages)
@@ -339,7 +339,7 @@ func runResumeTUI(cfg *config.Config, mem *memory.Store, id string) error {
 	m.sessID = sess.ID
 	restoreTodos(m.todos, sess)
 	if sess.Title != "" {
-		m.lines = append(m.lines, line{lineInfo, stMuted.Render("sesi dilanjutkan: " + sess.ID + " · " + sess.Title)})
+		m.lines = append(m.lines, line{lineInfo, stMuted.Render("session resumed: " + sess.ID + " · " + sess.Title)})
 	}
 	for _, msg := range ag.Messages {
 		switch {
@@ -380,7 +380,7 @@ func runModelsCmd(cfg *config.Config) {
 		os.Exit(1)
 	}
 	display, values, _ := groupModelsByProvider(models, cfg.Model.Name)
-	idx := runCLIPicker("pilih model (tersimpan ke config.yaml)", display)
+	idx := runCLIPicker("select model (saved to config.yaml)", display)
 	if idx < 0 || idx >= len(values) {
 		return
 	}

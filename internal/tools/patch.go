@@ -41,7 +41,7 @@ func registerPatch(r *Registry, opts Options) {
 			if count > 1 {
 				return Result{Output: fmt.Sprintf("old_string appears %d times in %s — use a more specific match with surrounding context", count, path), IsError: true}
 			}
-			autoCheckpoint(opts.Workdir)
+			autoCheckpoint(ctx, opts.Workdir)
 			replaced := strings.Replace(content, oldStr, newStr, 1)
 			if err := os.WriteFile(path, []byte(replaced), 0644); err != nil {
 				return Result{Output: fmt.Sprintf("write error: %v", err), IsError: true}

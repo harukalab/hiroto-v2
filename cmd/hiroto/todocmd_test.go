@@ -107,7 +107,7 @@ func TestTodoPanelWindowsAroundActive(t *testing.T) {
 	if !strings.Contains(panel, "task"+string(rune('a'+14))) {
 		t.Errorf("active task (index 15) not visible:\n%s", panel)
 	}
-	if !strings.Contains(panel, "selesai di atas") {
+	if !strings.Contains(panel, "done above") {
 		t.Errorf("expected hidden-above hint:\n%s", panel)
 	}
 }
@@ -117,13 +117,13 @@ func TestTodoCommandLifecycle(t *testing.T) {
 	m := todoModel(t)
 
 	m.handleTodoCmd([]string{"/todo"})
-	if got := lastLines(m, 1); !strings.Contains(got, "belum ada task") {
+	if got := lastLines(m, 1); !strings.Contains(got, "no tasks") {
 		t.Errorf("empty /todo output = %q", got)
 	}
 
-	m.handleTodoCmd([]string{"/todo", "add", "bikin", "fitur"})
+	m.handleTodoCmd([]string{"/todo", "add", "build", "feature"})
 	items := m.todos.Snapshot()
-	if len(items) != 1 || items[0].Content != "bikin fitur" {
+	if len(items) != 1 || items[0].Content != "build feature" {
 		t.Fatalf("after add: %+v", items)
 	}
 	if items[0].ID != "1" {

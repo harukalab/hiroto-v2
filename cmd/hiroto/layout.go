@@ -7,7 +7,7 @@ import (
 )
 
 // helpLine is the bottom key-hint bar.
-const helpLine = "Enter kirim • Ctrl+P model • Ctrl+R sesi • Ctrl+S simpan • Ctrl+L bersih • ↑↓ history • scroll/PgUp-Dn geser • Ctrl+C keluar"
+const helpLine = "Enter send • Ctrl+P model • Ctrl+R session • Ctrl+S save • Ctrl+L clear • ↑↓ history • scroll/PgUp-Dn scroll • Ctrl+C exit"
 
 // layoutParts builds the frame sections. includeVP controls whether the
 // transcript viewport is part of the result:
@@ -55,16 +55,14 @@ func (m *model) layoutParts(includeVP bool) []string {
 // statusBarText renders the bottom status line: HR chip, version, token
 // estimate, and the busy/"siap" indicator.
 func (m *model) statusBarText() string {
-	status := stMuted.Render("siap")
+	status := stMuted.Render("ready")
 	if m.busy {
-		label := "bekerja…"
+		label := "working"
 		if m.streaming {
-			label = "menulis…"
+			label = "writing"
 		}
 		status = stToolTag.Render(m.spinner.View() + " " + label)
 	}
-	left := stChip.Render(" HR ") + stMuted.Render(" hiroto v"+version)
-	right := status
 	if len(m.ag.Messages) > 0 {
 		tok := 0
 		for _, msg := range m.ag.Messages {
@@ -72,13 +70,14 @@ func (m *model) statusBarText() string {
 				tok += len(s) / 3
 			}
 		}
-		right = stMuted.Render(fmt.Sprintf("~%dK", tok/1000)) + "  " + status
+		status = stMuted.Render(fmt.Sprintf("~%dK", tok/1000)) + "  " + status
 	}
-	pad := m.width - lipgloss.Width(left) - lipgloss.Width(right) - 2
+	left := stChip.Render(" HR ") + stMuted.Render(" hiroto v"+version)
+	pad := m.width - lipgloss.Width(left) - lipgloss.Width(status) - 2
 	if pad < 1 {
 		pad = 1
 	}
-	return left + strings_Repeat(pad) + right
+	return left + strings_Repeat(pad) + status
 }
 
 func strings_Repeat(n int) string {
